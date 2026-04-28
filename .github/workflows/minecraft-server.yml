@@ -41,7 +41,7 @@ jobs:
         run: |
           # Copia arquivos do repositório para o diretório do servidor
           #cp eula.txt .
-          cp server.properties .
+          #cp server.properties .
           
           # Cria diretório de mods e copia os mods do repositório
           mkdir -p mods
