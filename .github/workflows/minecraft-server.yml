@@ -39,36 +39,64 @@ jobs:
           
       - name: Prepare Server Files
         run: |
-          # Copia arquivos do repositório para o diretório do servidor
-          #cp eula.txt .
-          #cp server.properties .
+          # Garante que o eula.txt e server.properties existam no diretório atual
+          [ -f "eula.txt" ] || echo "eula=true" > eula.txt
           
-          # Cria diretório de mods e copia os mods do repositório
+          # Cria diretório de mods se não existir
           mkdir -p mods
-          if [ -d "mods_repo" ]; then
-            cp -r mods_repo/* mods/
+          
+          # Se você colocou os mods na pasta 'mods' do repositório, eles já estão aqui.
+          # Caso tenha usado outro nome, este comando garante a cópia:
+          if [ -d "mods" ]; then
+            echo "Pasta de mods detectada."
           fi
           
       - name: Start Pinggy Tunnel
         id: pinggy
         run: |
-          # Inicia o túnel TCP usando Pinggy (gratuito, sem necessidade de conta)
+          # Inicia o túnel TCP usando Pinggy
           ssh -p 443 -R0:localhost:25565 tcp@a.pinggy.io -o StrictHostKeyChecking=no -o ServerAliveInterval=30 > pinggy_out.txt 2>&1 &
-          sleep 10
           
-          # Extrai o IP e a porta do output do Pinggy
-          IP_PORT=$(grep -oP 'tcp://\K[a-zA-Z0-9.-]+:[0-9]+' pinggy_out.txt | head -n 1)
+          echo "Aguardando IP do túnel..."
+          for i in {1..12}; do
+            sleep 5
+            IP_PORT=$(grep -oP '(?<=tcp://)[a-zA-Z0-9.-]+:[0-9]+' pinggy_out.txt | head -n 1)
+            if [ ! -z "$IP_PORT" ]; then
+              echo "SERVER_IP=$IP_PORT" >> $GITHUB_ENV
+              echo "IP_FOUND=true" >> $GITHUB_ENV
+              echo "IP do Servidor: $IP_PORT"
+              break
+            fi
+          done
           
-          if [ -z "$IP_PORT" ]; then
-            echo "Falha ao obter IP do Pinggy. Verificando logs:"
-            cat pinggy_out.txt
-            IP_PORT="Erro ao obter IP"
-          fi
+      - name: Run Minecraft Server
+        run: |
+          echo "Iniciando servidor Minecraft..."
+          # Inicia o servidor em background e redireciona o log para um arquivo
+          java @user_jvm_args.txt -Xms4G -Xmx6G -jar forge-1.20.1-47.4.10-shim.jar nogui > server.log 2>&1 &
+          SERVER_PID=$!
           
-          echo "SERVER_IP=$IP_PORT" >> $GITHUB_ENV
-          echo "IP do Servidor: $IP_PORT"
+          echo "Aguardando o servidor carregar (isso pode levar alguns minutos)..."
+          # Monitora o log até encontrar a mensagem de sucesso
+          timeout 600s bash -c 'until grep -q "Done (" server.log; do sleep 5; done' || echo "Tempo limite de espera excedido, mas continuando..."
+          
+          echo "Servidor parece estar online! Enviando e-mail..."
+          echo "SERVER_READY=true" >> $GITHUB_ENV
+          
+          # Mantém o processo rodando e mostra os logs no console
+          tail -f server.log &
+          TAIL_PID=$!
+          
+          # Roda por 5 horas e 20 minutos
+          sleep 19200
+          
+          echo "Tempo limite atingido. Desligando servidor..."
+          kill $SERVER_PID
+          wait $SERVER_PID || true
+          kill $TAIL_PID
           
       - name: Send Email with Server IP
+        if: env.IP_FOUND == 'true'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -82,19 +110,13 @@ jobs:
           body: |
             Olá!
             
-            Seu servidor Minecraft Forge 1.20.1 foi iniciado com sucesso no GitHub Actions.
+            Seu servidor Minecraft Forge 1.20.1 foi iniciado.
             
             IP de Conexão: ${{ env.SERVER_IP }}
             
-            O servidor ficará online por aproximadamente 5 horas e 30 minutos antes de ser reiniciado automaticamente (devido aos limites do GitHub Actions).
+            Nota: Se não conseguir conectar imediatamente, aguarde 2-3 minutos para o Forge terminar de carregar os mods.
             
             Bom jogo!
-            
-      - name: Run Minecraft Server
-        run: |
-          # Executa o servidor por 5 horas e 30 minutos (19800 segundos)
-          # O limite do GitHub Actions é de 6 horas
-          timeout 19800 java @user_jvm_args.txt -Xms4G -Xmx6G -jar forge-1.20.1-47.4.10-shim.jar nogui || true
           
       - name: Save World Data
         if: always()
@@ -103,9 +125,9 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Adiciona o mundo e outras configurações alteradas
-          git add world/
-          git add banned-ips.json banned-players.json ops.json whitelist.json usercache.json || true
+          # Adiciona o mundo e outras configurações alteradas (ignora se não existirem)
+          git add world/ 2>/dev/null || true
+          git add banned-ips.json banned-players.json ops.json whitelist.json usercache.json 2>/dev/null || true
           
           # Faz o commit e push se houver mudanças
           if git diff --staged --quiet; then
