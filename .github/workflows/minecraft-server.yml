@@ -1,0 +1,116 @@
+name: Minecraft Forge 1.20.1 Server
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *' # Executa a cada 5 horas (limite do Actions é 6h)
+
+jobs:
+  run-server:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl wget
+          
+      - name: Download Forge Installer
+        run: |
+          wget https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.1-47.4.10/forge-1.20.1-47.4.10-installer.jar -O forge-installer.jar
+          
+      - name: Install Forge Server
+        run: |
+          java -jar forge-installer.jar --installServer
+          rm forge-installer.jar
+          
+      - name: Prepare Server Files
+        run: |
+          # Copia arquivos do repositório para o diretório do servidor
+          cp eula.txt .
+          cp server.properties .
+          
+          # Cria diretório de mods e copia os mods do repositório
+          mkdir -p mods
+          if [ -d "mods_repo" ]; then
+            cp -r mods_repo/* mods/
+          fi
+          
+      - name: Start Pinggy Tunnel
+        id: pinggy
+        run: |
+          # Inicia o túnel TCP usando Pinggy (gratuito, sem necessidade de conta)
+          ssh -p 443 -R0:localhost:25565 tcp@a.pinggy.io -o StrictHostKeyChecking=no -o ServerAliveInterval=30 > pinggy_out.txt 2>&1 &
+          sleep 10
+          
+          # Extrai o IP e a porta do output do Pinggy
+          IP_PORT=$(grep -oP 'tcp://\K[a-zA-Z0-9.-]+:[0-9]+' pinggy_out.txt | head -n 1)
+          
+          if [ -z "$IP_PORT" ]; then
+            echo "Falha ao obter IP do Pinggy. Verificando logs:"
+            cat pinggy_out.txt
+            IP_PORT="Erro ao obter IP"
+          fi
+          
+          echo "SERVER_IP=$IP_PORT" >> $GITHUB_ENV
+          echo "IP do Servidor: $IP_PORT"
+          
+      - name: Send Email with Server IP
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "Seu Servidor Minecraft está Online!"
+          to: "pabloluizgz@gmail.com"
+          from: "GitHub Actions Minecraft Server"
+          body: |
+            Olá!
+            
+            Seu servidor Minecraft Forge 1.20.1 foi iniciado com sucesso no GitHub Actions.
+            
+            IP de Conexão: ${{ env.SERVER_IP }}
+            
+            O servidor ficará online por aproximadamente 5 horas e 30 minutos antes de ser reiniciado automaticamente (devido aos limites do GitHub Actions).
+            
+            Bom jogo!
+            
+      - name: Run Minecraft Server
+        run: |
+          # Executa o servidor por 5 horas e 30 minutos (19800 segundos)
+          # O limite do GitHub Actions é de 6 horas
+          timeout 19800 java @user_jvm_args.txt -Xms4G -Xmx6G -jar forge-1.20.1-47.4.10-shim.jar nogui || true
+          
+      - name: Save World Data
+        if: always()
+        run: |
+          # Configura o git
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Adiciona o mundo e outras configurações alteradas
+          git add world/
+          git add banned-ips.json banned-players.json ops.json whitelist.json usercache.json || true
+          
+          # Faz o commit e push se houver mudanças
+          if git diff --staged --quiet; then
+            echo "Nenhuma mudança no mundo para salvar."
+          else
+            git commit -m "Auto-save: Atualização do mundo e configurações [skip ci]"
+            git push
+          fi
